@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for Dodo Payments and Mock PSP
-FROM rust:1.79-slim AS builder
+FROM rust:latest AS builder
 
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
@@ -7,7 +7,7 @@ WORKDIR /usr/src/dodo-payments
 COPY . .
 
 # Build release binaries for all workspace members
-RUN cargo build --release
+RUN cargo build --release --workspace
 
 # Runner stage
 FROM debian:bookworm-slim AS runner
