@@ -275,12 +275,3 @@ cargo test -- --nocapture
 
 ---
 
-## Demo Video
-
-> 📹 **[Link to be added before submission]**
-
-Structure (≈8 minutes):
-1. `0:00–1:30` — Architecture walkthrough
-2. `1:30–4:00` — Live `docker compose up` demo (customer → invoice → pay → webhook)
-3. `4:00–6:00` — `DESIGN.md` state machine explanation
-4. `6:00–8:00` — Payment engine code: `SELECT FOR UPDATE`, idempotency, `tok_timeout` → `pending`
