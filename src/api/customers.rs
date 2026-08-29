@@ -48,7 +48,7 @@ async fn create_customer(
     .bind(req.email)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
+    .map_err(|_e| {
         ApiErrorResponse::new("internal_error", "Failed to create customer")
             .into_response_with_code(StatusCode::INTERNAL_SERVER_ERROR)
     })?;

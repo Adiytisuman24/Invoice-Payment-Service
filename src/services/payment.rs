@@ -195,6 +195,9 @@ pub async fn process_invoice_payment(
             .unwrap_or_default();
 
             // ── Transaction 2: persist result atomically ───────────────────────
+            // Re-acquire a row lock on the invoice to handle the payment-vs-void race:
+            // While the PSP call was in-flight (outside Tx1), the business could have
+            // voided the invoice. We must NOT overwrite a terminal state with 'paid'.
             let mut tx2 = state.db.begin().await.map_err(|_| {
                 ApiErrorResponse::new("internal_error", "Failed to start update transaction")
                     .into_response_with_code(StatusCode::INTERNAL_SERVER_ERROR)
@@ -221,18 +224,51 @@ pub async fn process_invoice_payment(
                     .into_response_with_code(StatusCode::INTERNAL_SERVER_ERROR)
             })?;
 
+            // Re-lock and re-read invoice state to guard against a concurrent void
+            // that occurred while the PSP call was in-flight.
+            let current_invoice_state: Option<(String,)> = sqlx::query_as(
+                "SELECT state FROM invoices WHERE id = $1 FOR UPDATE"
+            )
+            .bind(invoice_id)
+            .fetch_optional(&mut *tx2)
+            .await
+            .map_err(|_| {
+                ApiErrorResponse::new("internal_error", "Failed to re-read invoice state")
+                    .into_response_with_code(StatusCode::INTERNAL_SERVER_ERROR)
+            })?;
+
+            let current_state_str = current_invoice_state
+                .as_ref()
+                .map(|(s,)| s.as_str())
+                .unwrap_or("unknown");
+
+            // Only transition to PAID if the invoice is still OPEN.
+            // If it was voided (or moved to any other terminal state) while the PSP
+            // call was in-flight, we record the payment attempt result but preserve
+            // the terminal state — the payment will be reconciled out-of-band.
             let (event_type, invoice_state_str) = if attempt_status == PaymentAttemptStatus::Succeeded {
-                sqlx::query("UPDATE invoices SET state = 'paid' WHERE id = $1")
-                    .bind(invoice_id)
-                    .execute(&mut *tx2)
-                    .await
-                    .map_err(|_| {
-                        ApiErrorResponse::new("internal_error", "Failed to mark invoice paid")
-                            .into_response_with_code(StatusCode::INTERNAL_SERVER_ERROR)
-                    })?;
-                ("invoice.paid", "paid")
+                if current_state_str == "open" {
+                    sqlx::query("UPDATE invoices SET state = 'paid' WHERE id = $1")
+                        .bind(invoice_id)
+                        .execute(&mut *tx2)
+                        .await
+                        .map_err(|_| {
+                            ApiErrorResponse::new("internal_error", "Failed to mark invoice paid")
+                                .into_response_with_code(StatusCode::INTERNAL_SERVER_ERROR)
+                        })?;
+                    ("invoice.paid", "paid")
+                } else {
+                    // Invoice was voided or transitioned while PSP was processing.
+                    // Do not overwrite terminal state; fire payment_failed event so
+                    // the business knows the card was charged but the invoice is closed.
+                    tracing::warn!(
+                        "PSP succeeded for attempt {} but invoice {} is now '{}'; skipping paid transition",
+                        attempt_id, invoice_id, current_state_str
+                    );
+                    ("invoice.payment_failed", current_state_str)
+                }
             } else {
-                ("invoice.payment_failed", "open")
+                ("invoice.payment_failed", current_state_str)
             };
 
             let webhook_payload = json!({

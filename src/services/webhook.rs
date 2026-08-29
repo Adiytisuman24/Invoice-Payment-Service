@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use reqwest::Client;
 use std::time::Duration;
-use chrono::{Utc, DateTime};
+use chrono::Utc;
 use uuid::Uuid;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -18,7 +18,16 @@ pub async fn run_webhook_worker(db: PgPool) {
         .expect("Failed to build reqwest client for webhook worker");
 
     loop {
-        // Fetch up to 10 pending deliveries where next_attempt_at <= now()
+        // Atomically claim pending deliveries using a transaction with FOR UPDATE SKIP LOCKED
+        let mut tx = match db.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!("Database error starting webhook claim transaction: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
         let result: Result<Vec<PendingDelivery>, sqlx::Error> = sqlx::query_as(
             "SELECT d.id, d.endpoint_id, d.event_id, d.event_type, d.payload, d.status, d.attempts,
                     e.url, e.signing_secret
@@ -26,13 +35,37 @@ pub async fn run_webhook_worker(db: PgPool) {
              JOIN webhook_endpoints e ON d.endpoint_id = e.id
              WHERE d.status = 'pending' AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= now())
              ORDER BY d.created_at ASC
-             LIMIT 10"
+             LIMIT 10
+             FOR UPDATE OF d SKIP LOCKED"
         )
-        .fetch_all(&db)
+        .fetch_all(&mut *tx)
         .await;
 
         match result {
-            Ok(deliveries) => {
+            Ok(deliveries) if !deliveries.is_empty() => {
+                let delivery_ids: Vec<Uuid> = deliveries.iter().map(|d| d.id).collect();
+                
+                // Atomically mark claimed records as 'processing' to prevent any concurrent worker duplication
+                if let Err(e) = sqlx::query(
+                    "UPDATE webhook_deliveries
+                     SET status = 'processing'
+                     WHERE id = ANY($1)"
+                )
+                .bind(&delivery_ids)
+                .execute(&mut *tx)
+                .await {
+                    error!("Failed to mark webhooks as processing: {:?}", e);
+                    tx.rollback().await.ok();
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+
+                if let Err(e) = tx.commit().await {
+                    error!("Failed to commit webhook claim transaction: {:?}", e);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+
                 for delivery in deliveries {
                     let db_clone = db.clone();
                     let client_clone = http_client.clone();
@@ -43,8 +76,12 @@ pub async fn run_webhook_worker(db: PgPool) {
                     });
                 }
             }
+            Ok(_) => {
+                tx.rollback().await.ok();
+            }
             Err(e) => {
                 error!("Database error fetching pending webhooks: {:?}", e);
+                tx.rollback().await.ok();
             }
         }
 
@@ -56,10 +93,13 @@ pub async fn run_webhook_worker(db: PgPool) {
 #[derive(sqlx::FromRow, Debug)]
 struct PendingDelivery {
     id: Uuid,
+    #[allow(dead_code)]
     endpoint_id: Uuid,
     event_id: Uuid,
+    #[allow(dead_code)]
     event_type: String,
     payload: Value,
+    #[allow(dead_code)]
     status: String,
     attempts: i32,
     url: String,

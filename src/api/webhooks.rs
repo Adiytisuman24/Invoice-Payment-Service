@@ -10,7 +10,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 use crate::api::auth::AuthenticatedBusiness;
 use crate::api::ApiErrorResponse;
-use crate::domain::webhook::WebhookEndpoint;
+use crate::domain::webhook::{WebhookEndpoint, WebhookEndpointSummary};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -65,8 +65,10 @@ async fn list_webhook_endpoints(
     State(state): State<AppState>,
     auth: AuthenticatedBusiness,
 ) -> Result<impl IntoResponse, Response> {
-    let endpoints: Vec<WebhookEndpoint> = sqlx::query_as(
-        "SELECT id, business_id, url, signing_secret, created_at
+    // signing_secret is intentionally excluded from the list response.
+    // It is only returned at creation time and cannot be retrieved afterwards.
+    let endpoints: Vec<WebhookEndpointSummary> = sqlx::query_as(
+        "SELECT id, business_id, url, created_at
          FROM webhook_endpoints
          WHERE business_id = $1
          ORDER BY created_at DESC"

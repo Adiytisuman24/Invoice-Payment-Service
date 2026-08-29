@@ -2,7 +2,7 @@ use axum::{
     async_trait,
     extract::{FromRef, FromRequestParts},
     http::{header::AUTHORIZATION, request::Parts, StatusCode},
-    response::{IntoResponse, Response},
+    response::{Response},
 };
 use uuid::Uuid;
 use crate::state::AppState;

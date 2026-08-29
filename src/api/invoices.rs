@@ -125,7 +125,7 @@ async fn create_invoice(
     .bind(req.due_date)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| {
+    .map_err(|_e| {
         ApiErrorResponse::new("internal_error", "Failed to insert invoice")
             .into_response_with_code(StatusCode::INTERNAL_SERVER_ERROR)
     })?;

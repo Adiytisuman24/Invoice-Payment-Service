@@ -99,22 +99,75 @@ The initial lock query checks if `invoice.state = 'paid'`. If so, the transactio
 ## 4. Webhook Design
 
 Webhook delivery is decoupled from the main HTTP thread to prevent slow client servers from blocking API response times:
-1. **Enqueuing:** Webhook events are enqueued as rows in `webhook_deliveries` atomically inside the payment update transaction.
-2. **Worker Polling:** A background Tokio task polls the table for pending items where `next_attempt_at <= now()`.
+
+1. **Enqueuing:** Webhook events are written to `webhook_deliveries` atomically inside the same database transaction as the invoice state update. This guarantees the event is never lost, even if the application crashes immediately after committing.
+
+2. **Atomic Job Claiming (SKIP LOCKED):** The background worker claims pending deliveries using a dedicated transaction with `FOR UPDATE OF d SKIP LOCKED`. It marks claimed rows as `'processing'` before committing the claim transaction — only then does it spawn HTTP dispatch tasks. This prevents any two concurrent workers (or two poll cycles) from processing the same delivery simultaneously.
+
+```sql
+BEGIN;
+  SELECT d.id, ...
+  FROM webhook_deliveries d
+  JOIN webhook_endpoints e ON d.endpoint_id = e.id
+  WHERE d.status = 'pending' AND next_attempt_at <= now()
+  FOR UPDATE OF d SKIP LOCKED;
+
+  UPDATE webhook_deliveries SET status = 'processing' WHERE id = ANY($1);
+COMMIT;
+-- HTTP dispatch happens here, outside the transaction
+```
+
 3. **HMAC-SHA256 Signing:** The body is signed using the endpoint's secret:
    $$\text{Signature} = \text{HMAC-SHA256}(\text{signing\_secret}, \text{timestamp} + \text{"."} + \text{payload})$$
-   The signature is sent via the `X-Webhook-Signature` header, along with a `X-Webhook-Timestamp` for replay protection.
-4. **Retry Policy:** We implement exponential backoff with a maximum of 5 attempts:
-   * Attempt 1: Immediate
-   * Attempt 2: +10 seconds
-   * Attempt 3: +30 seconds
-   * Attempt 4: +2 minutes
-   * Attempt 5: +10 minutes
-   * If all fail, the delivery is marked as `exhausted`.
+   The signature is sent via the `X-Webhook-Signature: sha256=<hex>` header, along with `X-Webhook-Timestamp` for replay protection.
+
+4. **Signing Secret Redaction:** The `signing_secret` is returned **only at endpoint creation time** and cannot be retrieved via the list endpoint (`GET /v1/webhook-endpoints`). This follows the same pattern as Stripe.
+
+5. **Retry Policy (exponential backoff, max 5 attempts):**
+   | Attempt | Delay from last failure |
+   |---------|------------------------|
+   | 1       | Immediate              |
+   | 2       | +10 seconds            |
+   | 3       | +30 seconds            |
+   | 4       | +2 minutes             |
+   | 5       | +10 minutes            |
+   
+   After 5 consecutive failures the delivery is marked `exhausted` and stops retrying.
 
 ---
 
-## 5. API Key Model
+## 5. Payment vs. Void Race Condition
+
+### Problem
+Between Transaction 1 (lock released) and Transaction 2 (PSP result written), the business can void the invoice. Without a second lock, Transaction 2 would overwrite `void` with `paid` — an incorrect terminal state collision.
+
+### Solution (Two-Lock Pattern)
+
+```text
+┌─ Transaction 1 ─────────────────────────────────────────────────┐
+│  SELECT invoice FOR UPDATE                                       │
+│  Guard: state == 'open' (else 409)                              │
+│  INSERT payment_attempts (status='pending')                     │
+│  COMMIT  ← lock released here                                   │
+└──────────────────────────────────────────────────────────────────┘
+         │
+         ▼  (PSP HTTP call — lock NOT held)
+┌─ Transaction 2 ─────────────────────────────────────────────────┐
+│  UPDATE payment_attempts SET status=... (result)                │
+│  SELECT state FROM invoices WHERE id=$1 FOR UPDATE  ← relock   │
+│  IF state == 'open'  → UPDATE invoices SET state='paid'         │
+│                         enqueue invoice.paid webhook            │
+│  IF state != 'open'  → skip state update (preserve void/etc.)  │
+│                         enqueue invoice.payment_failed webhook  │
+│  COMMIT                                                         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+If the invoice was voided while the PSP was processing, Transaction 2 detects the terminal state and skips the `paid` transition. The payment attempt is still recorded as `succeeded` (the card was charged), and a `invoice.payment_failed` webhook is fired so the business can reconcile the charge out-of-band.
+
+---
+
+## 6. API Key Model
 
 We use a hashed API key model:
 * **Prefix:** API keys are generated as `dodo_test_` followed by random characters. We store a short prefix (`dodo_test_...`) in plain text to assist in debugging.
@@ -124,18 +177,26 @@ We use a hashed API key model:
 
 ---
 
-## 6. What I Cut and Why
+## 7. Deliberately Out of Scope
 
-* **Refunds / Partial Payments:** Excluded as they represent separate domain requirements and were explicitly out-of-scope.
-* **OAuth / OAuth2:** Replaced by straightforward, secure API keys, which are standard for developer-facing payment APIs.
-* **Redis Queue:** Replaced by a PostgreSQL-backed queue table. Using Postgres avoids introducing another stateful dependency (Redis), keeping the project simple and self-contained while preserving transactional guarantees for webhook enqueuing.
+The following were explicitly excluded to keep the implementation focused and correct:
+
+| Feature | Reason Excluded |
+|---------|-----------------|
+| Frontend / Dashboard | No UI was built. Effort was directed entirely at backend correctness, race condition handling, and failure-mode testing. |
+| Refunds / Partial Payments | Separate domain requirements; not specified in the brief. |
+| OAuth / OAuth2 | Replaced by secure API keys, which are standard for developer-facing payment APIs (see Stripe, Dodo). |
+| Redis Queue | Replaced by a PostgreSQL-backed `webhook_deliveries` table. Avoids introducing another stateful dependency while preserving transactional guarantees. |
+| Multi-region / Horizontal Scaling | A single API replica plus Docker Compose is the deployment target. |
+| PSP Reconciliation Cron | Documented as a production gap; not implemented in the take-home scope. |
 
 ---
 
-## 7. Production Readiness Gap
+## 8. Production Readiness Gaps
 
 1. **Database Connection Tuning:** The PgPool should be tuned for high availability, utilizing connection pooling (e.g., PgBouncer) and read replicas.
-2. **Distributed Locking:** For horizontal API scaling, row locking (`FOR UPDATE`) is highly effective but holds database connections. In huge scale, one might employ Redis-based advisory locks (Redlock) or optimistic concurrency models to reduce DB lock hold times.
+2. **Distributed Locking:** For horizontal API scaling, row locking (`FOR UPDATE`) is highly effective but holds database connections. At huge scale, one might employ Redis advisory locks (Redlock) or optimistic concurrency to reduce DB lock hold times.
 3. **API Key Management Service:** Key generation and hashing should be delegated to a KMS or vault-like service with rotation support, rather than simple DB insertions.
-4. **Reconciliation Cron:** A daily cron job should poll the PSP for all `pending` payment attempts to resolve timed-out transactions.
+4. **Reconciliation Cron:** A daily cron job should poll the PSP for all `pending` payment attempts to resolve timed-out transactions whose outcome is ambiguous.
 5. **Rate Limiting:** IP-based and business-based token bucket rate limiting should be deployed at the API gateway layer to prevent denial-of-service.
+

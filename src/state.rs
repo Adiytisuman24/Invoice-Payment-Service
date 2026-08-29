@@ -6,5 +6,6 @@ use crate::psp::client::PspClient;
 pub struct AppState {
     pub db: PgPool,
     pub psp_client: PspClient,
+    #[allow(dead_code)]
     pub config: Config,
 }
