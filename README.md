@@ -69,7 +69,17 @@ OPEN ──[ payment success ]──► PAID ┐
 
 ## Getting Started
 
-One command starts everything — PostgreSQL, the Invoice API (including migrations + seeding), and the Mock PSP:
+### Option A: Single-Prompt Runner & Test Suite (Recommended)
+
+```bash
+# Start all containers, wait for readiness, and run all 14 end-to-end verification tests:
+./dodopayments.sh test
+
+# Or simply start the services in background:
+./dodopayments.sh
+```
+
+### Option B: Docker Compose
 
 ```bash
 docker compose up --build -d
@@ -78,8 +88,9 @@ docker compose up --build -d
 **Services:**
 - Invoice API → `http://localhost:8080`
 - Mock PSP → `http://localhost:8081`
+- PostgreSQL → `localhost:5432`
 
-No manual setup steps. Migrations run automatically at startup.
+No manual setup steps. Migrations run automatically at startup. For a full list of copy-paste test commands, see [`COMMANDS.md`](COMMANDS.md).
 
 ---
 
@@ -102,7 +113,7 @@ Seeded at first startup (configurable via environment variables):
 curl -s -X POST http://localhost:8080/v1/customers \
   -H "Authorization: Bearer dodo_test_seed_key_abc123" \
   -H "Content-Type: application/json" \
-  -d '{"name": "Alice Smith", "email": "alice@example.com"}' | jq
+  -d '{"name": "Alice Smith", "email": "alice@example.com"}' | python3 -m json.tool
 ```
 
 Copy the returned `"id"` — you need it for the next step.
@@ -120,7 +131,7 @@ curl -s -X POST http://localhost:8080/v1/invoices \
       {"description": "Engineering consulting", "quantity": 2, "unit_amount_cents": 50000},
       {"description": "Hosting fees",           "quantity": 1, "unit_amount_cents": 2500}
     ]
-  }' | jq
+  }' | python3 -m json.tool
 ```
 
 The server computes `total_cents = 102500` (i.e. $1,025.00). No client-provided total is accepted.
@@ -132,7 +143,7 @@ curl -s -X POST http://localhost:8080/v1/invoices/<INVOICE_UUID>/pay \
   -H "Authorization: Bearer dodo_test_seed_key_abc123" \
   -H "Idempotency-Key: pay-demo-001" \
   -H "Content-Type: application/json" \
-  -d '{"card_token": "tok_success"}' | jq
+  -d '{"card_token": "tok_success"}' | python3 -m json.tool
 ```
 
 Returns `200 OK` with `"status": "succeeded"`. Replaying the identical request with the same `Idempotency-Key` returns the **stored response verbatim** — no second PSP call is made.
@@ -144,7 +155,7 @@ curl -s -X POST http://localhost:8080/v1/invoices/<NEW_INVOICE_UUID>/pay \
   -H "Authorization: Bearer dodo_test_seed_key_abc123" \
   -H "Idempotency-Key: pay-demo-002" \
   -H "Content-Type: application/json" \
-  -d '{"card_token": "tok_card_declined"}' | jq
+  -d '{"card_token": "tok_card_declined"}' | python3 -m json.tool
 ```
 
 Returns `200 OK` with `"status": "failed"`, `"failure_code": "card_declined"`. The invoice remains `open` and can be retried.
@@ -155,10 +166,10 @@ Returns `200 OK` with `"status": "failed"`, `"failure_code": "card_declined"`. T
 curl -s -X POST http://localhost:8080/v1/webhook-endpoints \
   -H "Authorization: Bearer dodo_test_seed_key_abc123" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://httpbin.org/post"}' | jq
+  -d '{"url": "https://httpbin.org/post"}' | python3 -m json.tool
 ```
 
-> **Note:** `https://httpbin.org/post` is used here as an optional public echo service for manual inspection. In automated testing or CI environments substitute a local receiver. The service signs each event with the returned `signing_secret` using `HMAC-SHA256` and delivers it asynchronously via the background worker.
+> **Note:** `signing_secret` is returned **only once** upon registration. Subsequent `GET /v1/webhook-endpoints` requests return redacted records for security.
 
 ---
 
@@ -181,7 +192,7 @@ time curl -s -X POST http://localhost:8080/v1/invoices/<INVOICE_UUID>/pay \
   -H "Authorization: Bearer dodo_test_seed_key_abc123" \
   -H "Idempotency-Key: pay-timeout-001" \
   -H "Content-Type: application/json" \
-  -d '{"card_token": "tok_timeout"}' | jq
+  -d '{"card_token": "tok_timeout"}' | python3 -m json.tool
 ```
 
 Expected: `HTTP 202`, `"status": "pending"` in **≈5 seconds**, not 30. The invoice stays `open`. The attempt is `pending` because a timeout is an ambiguous outcome — the card may or may not have been charged. See [`DESIGN.md`](DESIGN.md) §3 for the full reasoning.
@@ -226,11 +237,13 @@ X-Webhook-Timestamp: <unix timestamp>
 X-Webhook-Id: <event UUID>
 ```
 
+Deliveries are claimed using PostgreSQL `FOR UPDATE OF d SKIP LOCKED` inside an atomic transaction, marking claimed rows as `'processing'` to prevent concurrent worker duplication.
+
 ---
 
 ## Running Integration Tests
 
-The three required tests target the live running service (real HTTP, real database, real Mock PSP):
+All integration tests run against the live stack (real HTTP, real PostgreSQL, real Mock PSP):
 
 ```bash
 # 1. Ensure the stack is up
@@ -239,13 +252,14 @@ docker compose up -d
 # 2. Run all integration tests
 DATABASE_URL="postgres://postgres:postgres@localhost:5432/dodo" \
 API_URL="http://localhost:8080" \
-cargo test
+cargo test -- --nocapture
 ```
 
 | Test | What it verifies |
 |------|-----------------|
-| `concurrency` | 10 concurrent `/pay` requests → exactly 1 PSP charge; remaining requests do not initiate additional charges |
-| `idempotency` | Replay returns stored response; reuse with different body → 409 |
+| `concurrency` | 10 concurrent `/pay` requests → exactly 1 PSP charge; remaining 9 requests serialized safely |
+| `idempotency` | Replay returns stored response; reuse with different body → 409 Conflict |
+| `payment_vs_void` | Concurrent payment + void race → re-locks invoice in Tx2, prevents split terminal state |
 | `psp_failure` | Decline → failed+open; network error → failed+open; timeout → 202 pending in ≤8 s |
 
 ---
@@ -254,8 +268,9 @@ cargo test
 
 | File | Contents |
 |------|----------|
-| [`DESIGN.md`](DESIGN.md) | Data model, state machine, concurrency, failure modes, webhook design, production gaps |
+| [`DESIGN.md`](DESIGN.md) | Data model, state machine, concurrency, two-lock race resolution, webhook atomicity, production gaps |
 | [`AI_USAGE.md`](AI_USAGE.md) | Tools used, independent decisions, AI errors corrected |
+| [`COMMANDS.md`](COMMANDS.md) | Copy-paste cheatsheet for testing every endpoint live |
 | [`openapi.yaml`](openapi.yaml) | Full OpenAPI 3.0 specification |
 
 ---
