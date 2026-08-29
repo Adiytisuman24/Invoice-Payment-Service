@@ -1,0 +1,490 @@
+openapi: 3.0.3
+info:
+  title: Dodo Payments Take-Home Service API
+  description: A small, highly correct invoice and payment service.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Local Invoice Service
+paths:
+  /v1/customers:
+    post:
+      summary: Create Customer
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - email
+              properties:
+                name:
+                  type: string
+                  example: Jane Doe
+                email:
+                  type: string
+                  example: jane@example.com
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+    get:
+      summary: List Customers
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Customer'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /v1/customers/{id}:
+    get:
+      summary: Retrieve Customer
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /v1/invoices:
+    post:
+      summary: Create Invoice
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - customer_id
+                - due_date
+                - items
+              properties:
+                customer_id:
+                  type: string
+                  format: uuid
+                due_date:
+                  type: string
+                  format: date
+                  example: '2026-12-31'
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - description
+                      - quantity
+                      - unit_amount_cents
+                    properties:
+                      description:
+                        type: string
+                        example: Engineering Consulting
+                      quantity:
+                        type: integer
+                        example: 2
+                      unit_amount_cents:
+                        type: integer
+                        format: int64
+                        example: 50000
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceDetail'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+    get:
+      summary: List Invoices
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [draft, open, paid, void, uncollectible]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invoice'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /v1/invoices/{id}:
+    get:
+      summary: Retrieve Invoice
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceDetail'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /v1/invoices/{id}/pay:
+    post:
+      summary: Pay Invoice
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - card_token
+              properties:
+                card_token:
+                  type: string
+                  enum: [tok_success, tok_insufficient_funds, tok_card_declined, tok_timeout, tok_network_error]
+                  example: tok_success
+      responses:
+        '200':
+          description: OK (Successful or Declined attempt completed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAttemptResponse'
+        '202':
+          description: Accepted (Attempt is pending or timed out)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAttemptResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /v1/invoices/{id}/void:
+    post:
+      summary: Void Invoice
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /v1/invoices/{id}/uncollectible:
+    post:
+      summary: Mark Invoice Uncollectible
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+
+  /v1/webhook-endpoints:
+    post:
+      summary: Create Webhook Endpoint
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - url
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  example: https://my-business.com/webhooks
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpoint'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+    get:
+      summary: List Webhook Endpoints
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WebhookEndpoint'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+  responses:
+    ErrorResponse:
+      description: Standard API Error response
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - error
+            properties:
+              error:
+                type: object
+                required:
+                  - code
+                  - message
+                properties:
+                  code:
+                    type: string
+                    example: validation_error
+                  message:
+                    type: string
+                    example: A validation error occurred.
+  schemas:
+    Customer:
+      type: object
+      required:
+        - id
+        - business_id
+        - name
+        - email
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        business_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    Invoice:
+      type: object
+      required:
+        - id
+        - business_id
+        - customer_id
+        - total_cents
+        - state
+        - due_date
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        business_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        total_cents:
+          type: integer
+          format: int64
+        state:
+          type: string
+          enum: [draft, open, paid, void, uncollectible]
+        due_date:
+          type: string
+          format: date
+        created_at:
+          type: string
+          format: date-time
+
+    InvoiceItem:
+      type: object
+      required:
+        - id
+        - invoice_id
+        - description
+        - quantity
+        - unit_amount_cents
+      properties:
+        id:
+          type: string
+          format: uuid
+        invoice_id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        quantity:
+          type: integer
+        unit_amount_cents:
+          type: integer
+          format: int64
+
+    InvoiceDetail:
+      allOf:
+        - $ref: '#/components/schemas/Invoice'
+        - type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/InvoiceItem'
+
+    PaymentAttemptResponse:
+      type: object
+      required:
+        - id
+        - invoice_id
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        invoice_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        failure_code:
+          type: string
+          nullable: true
+          enum: [insufficient_funds, card_declined, psp_unavailable]
+        psp_ref:
+          type: string
+          format: uuid
+          nullable: true
+
+    WebhookEndpoint:
+      type: object
+      required:
+        - id
+        - business_id
+        - url
+        - signing_secret
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        business_id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+        signing_secret:
+          type: string
+          example: whsec_0123456789abcdef
+        created_at:
+          type: string
+          format: date-time

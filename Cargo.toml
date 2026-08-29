@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    ".",
+    "mock-psp"
+]
+resolver = "2"
+
+[package]
+name = "dodo-payments"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7.9", features = ["macros"] }
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.8.0", features = [
+    "runtime-tokio",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json"
+] }
+uuid = { version = "1.8", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json"] }
+thiserror = "1.0"
+anyhow = "1.0"
+hmac = "0.12.1"
+sha2 = "0.10.8"
+hex = "0.4.3"
+tower-http = { version = "0.5.2", features = ["trace"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }

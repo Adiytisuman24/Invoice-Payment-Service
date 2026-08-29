@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dodo-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: dodo
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dodo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  invoice-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dodo-invoice-api
+    command: dodo-payments
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/dodo
+      PSP_URL: http://mock-psp:8081
+      PORT: 8080
+      DEMO_BUSINESS_ID: "00000000-0000-0000-0000-000000000001"
+      DEMO_API_KEY: "dodo_test_seed_key_abc123"
+      RUST_LOG: "info,dodo_payments=debug"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mock-psp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dodo-mock-psp
+    command: mock-psp
+    ports:
+      - "8081:8081"
+    environment:
+      PORT: 8081
+      RUST_LOG: "info,mock_psp=debug"
+
+volumes:
+  postgres_data:
